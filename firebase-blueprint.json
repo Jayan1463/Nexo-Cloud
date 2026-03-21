@@ -1,0 +1,188 @@
+{
+  "entities": {
+    "User": {
+      "title": "User Profile",
+      "description": "User profile information and global settings.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "email": { "type": "string", "format": "email" },
+        "displayName": { "type": "string" },
+        "photoURL": { "type": "string", "format": "uri" },
+        "currentOrgId": { "type": "string" },
+        "role": { "type": "string", "enum": ["owner", "admin", "developer", "viewer"] },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "email"]
+    },
+    "Organization": {
+      "title": "Organization",
+      "description": "A multi-tenant organization container.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "ownerId": { "type": "string" },
+        "plan": { "type": "string", "enum": ["free", "pro", "enterprise"] },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "name", "ownerId"]
+    },
+    "OrgMember": {
+      "title": "Organization Member",
+      "description": "A user's membership in an organization.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "role": { "type": "string", "enum": ["owner", "admin", "developer", "viewer"] },
+        "joinedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "role"]
+    },
+    "Project": {
+      "title": "Project",
+      "description": "A project within an organization.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "orgId": { "type": "string" },
+        "name": { "type": "string" },
+        "environment": { "type": "string", "enum": ["prod", "staging", "dev"] },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "orgId", "name"]
+    },
+    "Metric": {
+      "title": "Metric Data Point",
+      "description": "A single metrics data point for a resource.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "projectId": { "type": "string" },
+        "resourceId": { "type": "string" },
+        "type": { "type": "string", "enum": ["cpu", "memory", "network", "disk"] },
+        "value": { "type": "number" },
+        "timestamp": { "type": "string", "format": "date-time" },
+        "isAnomaly": { "type": "boolean" },
+        "anomalyScore": { "type": "number" }
+      },
+      "required": ["projectId", "resourceId", "type", "value", "timestamp"]
+    },
+    "Alert": {
+      "title": "Alert",
+      "description": "A triggered alert event.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "projectId": { "type": "string" },
+        "severity": { "type": "string", "enum": ["info", "warning", "critical"] },
+        "message": { "type": "string" },
+        "status": { "type": "string", "enum": ["active", "resolved"] },
+        "timestamp": { "type": "string", "format": "date-time" }
+      },
+      "required": ["projectId", "severity", "message", "timestamp"]
+    },
+    "Log": {
+      "title": "Log Entry",
+      "description": "A system log entry.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "projectId": { "type": "string" },
+        "level": { "type": "string", "enum": ["info", "warn", "error"] },
+        "message": { "type": "string" },
+        "service": { "type": "string" },
+        "timestamp": { "type": "string", "format": "date-time" }
+      },
+      "required": ["projectId", "level", "message", "timestamp"]
+    },
+    "Invite": {
+      "title": "Team Invite",
+      "description": "An invitation to join an organization.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "orgId": { "type": "string" },
+        "email": { "type": "string", "format": "email" },
+        "role": { "type": "string", "enum": ["admin", "developer", "viewer"] },
+        "status": { "type": "string", "enum": ["pending", "accepted", "declined"] },
+        "invitedBy": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["orgId", "email", "role", "status", "invitedBy"]
+    },
+    "Server": {
+      "title": "Infrastructure Server",
+      "description": "A real server connected via agent.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "projectId": { "type": "string" },
+        "name": { "type": "string" },
+        "apiKey": { "type": "string" },
+        "tags": { "type": "object", "additionalProperties": { "type": "string" } },
+        "lastSeen": { "type": "string", "format": "date-time" },
+        "status": { "type": "string", "enum": ["online", "offline"] },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "projectId", "name", "apiKey"]
+    },
+    "ServerMetric": {
+      "title": "Server Metric",
+      "description": "Metric data from a real server agent.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "serverId": { "type": "string" },
+        "projectId": { "type": "string" },
+        "cpu": { "type": "number" },
+        "memory": { "type": "number" },
+        "network": { "type": "number" },
+        "timestamp": { "type": "string", "format": "date-time" }
+      },
+      "required": ["serverId", "projectId", "cpu", "memory", "network", "timestamp"]
+    }
+  },
+  "firestore": {
+    "/users/{uid}": {
+      "schema": "User",
+      "description": "User profiles"
+    },
+    "/organizations/{orgId}": {
+      "schema": "Organization",
+      "description": "Organization details"
+    },
+    "/organizations/{orgId}/projects/{projectId}": {
+      "schema": "Project",
+      "description": "Projects within an organization"
+    },
+    "/organizations/{orgId}/members/{uid}": {
+      "schema": "OrgMember",
+      "description": "Membership details for a user in an organization"
+    },
+    "/organizations/{orgId}/invites/{inviteId}": {
+      "schema": "Invite",
+      "description": "Team invitations"
+    },
+    "/projects/{projectId}/metrics/{metricId}": {
+      "schema": "Metric",
+      "description": "Time-series metrics for a project"
+    },
+    "/projects/{projectId}/alerts/{alertId}": {
+      "schema": "Alert",
+      "description": "Alerts for a project"
+    },
+    "/projects/{projectId}/logs/{logId}": {
+      "schema": "Log",
+      "description": "Logs for a project"
+    },
+    "/servers/{serverId}": {
+      "schema": "Server",
+      "description": "Registered infrastructure servers"
+    },
+    "/servers/{serverId}/metrics/{metricId}": {
+      "schema": "ServerMetric",
+      "description": "Metrics for a specific server"
+    }
+  }
+}

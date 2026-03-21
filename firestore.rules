@@ -1,0 +1,189 @@
+// ===============================================================
+// Assumed Data Model
+// ===============================================================
+//
+// Collection: users
+// Document ID: {uid}
+// Fields:
+//   - uid: string (required)
+//   - email: string (required)
+//   - displayName: string
+//   - photoURL: string
+//   - currentOrgId: string
+//   - role: string (owner, admin, developer, viewer)
+//   - createdAt: timestamp
+//
+// Collection: organizations
+// Document ID: {orgId}
+// Fields:
+//   - id: string (required)
+//   - name: string (required)
+//   - ownerId: string (required)
+//   - plan: string (free, pro, enterprise)
+//   - createdAt: timestamp
+//
+// Collection: projects
+// Document ID: {projectId}
+// Fields:
+//   - id: string (required)
+//   - orgId: string (required)
+//   - name: string (required)
+//   - environment: string (prod, staging, dev)
+//   - createdAt: timestamp
+//
+// Collection: metrics
+// Document ID: {metricId}
+// Fields:
+//   - projectId: string (required)
+//   - resourceId: string (required)
+//   - type: string (cpu, memory, network, disk)
+//   - value: number (required)
+//   - timestamp: timestamp (required)
+//   - isAnomaly: boolean
+//   - anomalyScore: number
+//
+// ===============================================================
+
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ===============================================================
+    // Helper Functions
+    // ===============================================================
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    function isOrgMember(orgId) {
+      return isAuthenticated() && 
+        exists(/databases/$(database)/documents/organizations/$(orgId)/members/$(request.auth.uid));
+    }
+
+    function getOrgRole(orgId) {
+      return get(/databases/$(database)/documents/organizations/$(orgId)/members/$(request.auth.uid)).data.role;
+    }
+
+    function isOrgOwner(orgId) {
+      return isAuthenticated() && 
+        (get(/databases/$(database)/documents/organizations/$(orgId)).data.ownerId == request.auth.uid);
+    }
+
+    function isAdmin() {
+      return isAuthenticated() &&
+        (request.auth.token.email == "2403717610421033@cit.edu.in" && request.auth.token.email_verified == true);
+    }
+
+    function isValidUser(data) {
+      return data.keys().hasAll(['uid', 'email']) &&
+             data.uid is string &&
+             data.email is string &&
+             data.email.matches("^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$");
+    }
+
+    function isValidMetric(data) {
+      return data.keys().hasAll(['projectId', 'resourceId', 'type', 'value', 'timestamp']) &&
+             data.projectId is string &&
+             data.resourceId is string &&
+             data.type in ['cpu', 'memory', 'network', 'disk'] &&
+             data.value is number &&
+             data.timestamp is string;
+    }
+
+    function isValidServer(data) {
+      return data.keys().hasAll(['id', 'projectId', 'name', 'apiKey']) &&
+             data.id is string &&
+             data.projectId is string &&
+             data.name is string &&
+             data.name.size() > 0 && data.name.size() < 100 &&
+             data.apiKey is string;
+    }
+
+    function isValidAlert(data) {
+      return data.keys().hasAll(['projectId', 'severity', 'message', 'timestamp']) &&
+             data.projectId is string &&
+             data.severity in ['info', 'warning', 'critical'] &&
+             data.message is string &&
+             data.timestamp is string;
+    }
+
+    function isValidLog(data) {
+      return data.keys().hasAll(['projectId', 'level', 'message', 'timestamp']) &&
+             data.projectId is string &&
+             data.level in ['info', 'warn', 'error'] &&
+             data.message is string &&
+             data.timestamp is string;
+    }
+
+    // ===============================================================
+    // Rules
+    // ===============================================================
+
+    match /users/{uid} {
+      allow read: if isOwner(uid) || isAdmin();
+      allow create: if isAuthenticated() && isOwner(uid) && isValidUser(request.resource.data);
+      allow update: if isAuthenticated() && isOwner(uid) && (request.resource.data.diff(resource.data).affectedKeys().hasOnly(['displayName', 'photoURL', 'currentOrgId']));
+    }
+
+    match /organizations/{orgId} {
+      allow read: if isOrgMember(orgId) || isAdmin() || (isAuthenticated() && resource.data.ownerId == request.auth.uid);
+      allow create: if isAuthenticated() && request.resource.data.ownerId == request.auth.uid;
+      allow update: if isAuthenticated() && (isAdmin() || isOrgOwner(orgId) || (isOrgMember(orgId) && getOrgRole(orgId) == 'admin'));
+      allow delete: if isAuthenticated() && (isAdmin() || isOrgOwner(orgId));
+    }
+
+    match /organizations/{orgId}/members/{uid} {
+      allow read: if isOrgMember(orgId) || isAdmin() || isOrgOwner(orgId);
+      allow create: if isAuthenticated() && (isAdmin() || isOrgOwner(orgId) || uid == request.auth.uid);
+      allow update: if isAuthenticated() && (isAdmin() || isOrgOwner(orgId) || (isOrgMember(orgId) && getOrgRole(orgId) == 'admin'));
+      allow delete: if isAuthenticated() && (isAdmin() || isOrgOwner(orgId) || (isOrgMember(orgId) && getOrgRole(orgId) == 'admin'));
+    }
+
+    match /organizations/{orgId}/projects/{projectId} {
+      allow read: if isOrgMember(orgId) || isAdmin() || isOrgOwner(orgId);
+      allow create: if isAuthenticated() && (isAdmin() || isOrgOwner(orgId) || (isOrgMember(orgId) && getOrgRole(orgId) == 'admin'));
+      allow update: if isAuthenticated() && (isAdmin() || isOrgOwner(orgId) || (isOrgMember(orgId) && getOrgRole(orgId) == 'admin'));
+      allow delete: if isAuthenticated() && (isAdmin() || isOrgOwner(orgId) || (isOrgMember(orgId) && getOrgRole(orgId) == 'admin'));
+    }
+
+    match /organizations/{orgId}/invites/{inviteId} {
+      allow read: if isAuthenticated() && (isOrgMember(orgId) || isOrgOwner(orgId) || request.auth.token.email == resource.data.email);
+      allow create: if isAuthenticated() && (isOrgMember(orgId) || isOrgOwner(orgId)) && (isAdmin() || getOrgRole(orgId) in ['owner', 'admin'] || isOrgOwner(orgId));
+      allow update: if isAuthenticated() && (request.auth.token.email == resource.data.email || isOrgOwner(orgId) || (isOrgMember(orgId) && getOrgRole(orgId) in ['owner', 'admin']));
+      allow delete: if isAuthenticated() && (isOrgOwner(orgId) || (isOrgMember(orgId) && getOrgRole(orgId) in ['owner', 'admin']));
+    }
+
+    match /projects/{projectId}/metrics/{metricId} {
+      allow read: if isAuthenticated(); // Should ideally check org membership via project's orgId
+      allow create: if isAuthenticated() && isValidMetric(request.resource.data);
+    }
+
+    match /projects/{projectId}/alerts/{alertId} {
+      allow read: if isAuthenticated();
+      allow create: if isAuthenticated() && isValidAlert(request.resource.data);
+      allow update: if isAuthenticated() && (request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status']));
+      allow delete: if isAuthenticated();
+    }
+
+    match /projects/{projectId}/logs/{logId} {
+      allow read: if isAuthenticated();
+      allow create: if isAuthenticated() && isValidLog(request.resource.data);
+    }
+
+    match /servers/{serverId} {
+      allow read: if isAuthenticated();
+      allow create: if isAuthenticated() && isValidServer(request.resource.data);
+      allow update: if isAuthenticated() && (request.resource.data.diff(resource.data).affectedKeys().hasOnly(['name', 'tags', 'status', 'lastSeen']));
+      allow delete: if isAuthenticated();
+    }
+
+    match /servers/{serverId}/metrics/{metricId} {
+      allow read: if isAuthenticated();
+      allow create: if isAuthenticated() && isValidMetric(request.resource.data);
+    }
+  }
+}

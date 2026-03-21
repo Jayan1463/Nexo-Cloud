@@ -1,0 +1,7 @@
+{
+  "name": "Nexo Cloud",
+  "description": "Enterprise-grade cloud intelligence and observability platform with real-time metrics and 3D topology visualization.",
+  "requestFramePermissions": [
+    "geolocation"
+  ]
+}
