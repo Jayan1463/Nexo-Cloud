@@ -31,14 +31,18 @@ import {
   onSnapshot, 
   updateDoc, 
   deleteDoc,
-  serverTimestamp 
+  serverTimestamp,
+  sendPasswordResetEmail,
+  auth,
+  updateProfile,
+  signOut
 } from '../firebase';
 import { useAppStore } from '../store';
 import { cn } from '../lib/utils';
 import { Organization, UserProfile, Invite, Project, OrgMember } from '../types';
 
 export const Settings = () => {
-  const { user, currentOrgId } = useAppStore();
+  const { user, currentOrgId, setUser, setOrg: setCurrentOrg, setProject } = useAppStore();
   const [activeSection, setActiveSection] = useState<'profile' | 'organization' | 'projects' | 'security' | 'notifications'>('profile');
   const [displayName, setDisplayName] = useState(user?.displayName || '');
   const [org, setOrg] = useState<Organization | null>(null);
@@ -48,6 +52,9 @@ export const Settings = () => {
   const [loading, setLoading] = useState(false);
   const [saved, setSaved] = useState(false);
   const [errorMessage, setErrorMessage] = useState('');
+  const [successMessage, setSuccessMessage] = useState('');
+  const [passwordResetLoading, setPasswordResetLoading] = useState(false);
+  const [deleteAccountLoading, setDeleteAccountLoading] = useState(false);
 
   // Notification settings
   const [notifEmail, setNotifEmail] = useState(true);
@@ -56,6 +63,8 @@ export const Settings = () => {
 
   // Security settings
   const [twoFactor, setTwoFactor] = useState(false);
+  const [currentPassword, setCurrentPassword] = useState('');
+  const [newPassword, setNewPassword] = useState('');
 
   // Billing settings
   const [billingEmail, setBillingEmail] = useState(user?.email || '');
@@ -66,6 +75,11 @@ export const Settings = () => {
   const [inviteRows, setInviteRows] = useState<Array<{ email: string; role: 'admin' | 'developer' | 'viewer' }>>([
     { email: '', role: 'viewer' },
   ]);
+
+  useEffect(() => {
+    setDisplayName(user?.displayName || '');
+    setBillingEmail(user?.email || '');
+  }, [user?.displayName, user?.email]);
 
   useEffect(() => {
     if (!user?.uid) return;
@@ -134,15 +148,41 @@ export const Settings = () => {
   const handleSaveProfile = async () => {
     if (!user) return;
     setErrorMessage('');
+    setSuccessMessage('');
+    const normalizedDisplayName = displayName.trim();
+    if (!normalizedDisplayName) {
+      setErrorMessage('Display name is required.');
+      return;
+    }
+
     setLoading(true);
     try {
       const userRef = doc(db, 'users', user.uid);
-      await setDoc(userRef, {
-        displayName: displayName.trim(),
+      const payload = {
+        displayName: normalizedDisplayName,
         photoURL: user.photoURL || '',
         ...(currentOrgId ? { currentOrgId } : {}),
-      }, { merge: true });
+      };
+      const userSnap = await getDoc(userRef);
+      if (userSnap.exists()) {
+        await updateDoc(userRef, payload);
+      } else {
+        await setDoc(userRef, {
+          uid: user.uid,
+          email: user.email || '',
+          role: 'viewer',
+          createdAt: serverTimestamp(),
+          ...payload,
+        }, { merge: true });
+      }
+      if (auth.currentUser) {
+        await updateProfile(auth.currentUser, { displayName: normalizedDisplayName });
+        setUser(auth.currentUser);
+      }
+      setDisplayName(normalizedDisplayName);
+
       setSaved(true);
+      setSuccessMessage('Profile updated successfully.');
       setTimeout(() => setSaved(false), 3000);
     } catch (error) {
       console.error("Failed to save profile", error);
@@ -160,6 +200,7 @@ export const Settings = () => {
       const orgRef = doc(db, 'organizations', currentOrgId);
       await setDoc(orgRef, updates, { merge: true });
       setSaved(true);
+      setSuccessMessage('Organization updated.');
       setTimeout(() => setSaved(false), 3000);
     } catch (error) {
       console.error("Failed to update organization", error);
@@ -330,12 +371,90 @@ export const Settings = () => {
         updatedAt: Date.now(),
       }));
       setSaved(true);
+      setSuccessMessage('Settings saved successfully.');
       setTimeout(() => setSaved(false), 3000);
     } catch (error) {
       console.error('Failed to save settings', error);
       setErrorMessage('Failed to save settings in this browser.');
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handlePasswordReset = async () => {
+    if (!user?.email) {
+      setErrorMessage('No email found for this account.');
+      return;
+    }
+    if (!currentPassword.trim() || !newPassword.trim()) {
+      setErrorMessage('Current and new password fields are required.');
+      return;
+    }
+    if (newPassword.trim().length < 8) {
+      setErrorMessage('New password must be at least 8 characters.');
+      return;
+    }
+
+    setErrorMessage('');
+    setSuccessMessage('');
+    setPasswordResetLoading(true);
+    try {
+      await sendPasswordResetEmail(auth, user.email);
+      setSuccessMessage('Password reset email sent. Please check your inbox.');
+      setCurrentPassword('');
+      setNewPassword('');
+    } catch (error) {
+      console.error('Failed to send password reset email', error);
+      setErrorMessage('Failed to send password reset email.');
+    } finally {
+      setPasswordResetLoading(false);
+    }
+  };
+
+  const handleDeleteAccount = async () => {
+    if (!auth.currentUser || !user?.uid) {
+      setErrorMessage('You need to be signed in to delete your account.');
+      return;
+    }
+
+    const typed = window.prompt('Type DELETE to permanently delete your account.');
+    if (typed !== 'DELETE') {
+      setErrorMessage('Account deletion canceled. Type DELETE exactly to confirm.');
+      return;
+    }
+
+    if (!window.confirm('This permanently deletes your account and removes your org memberships. Continue?')) {
+      return;
+    }
+
+    setDeleteAccountLoading(true);
+    setErrorMessage('');
+    setSuccessMessage('');
+    try {
+      const token = await auth.currentUser.getIdToken(true);
+      const response = await fetch('/api/delete-account', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(payload?.error || 'Failed to delete account');
+      }
+
+      localStorage.removeItem(`nexo_settings_${user.uid}`);
+      setProject(null);
+      setCurrentOrg(null);
+      setUser(null);
+      await signOut(auth).catch(() => undefined);
+      window.location.href = '/';
+    } catch (error) {
+      console.error('Failed to delete account', error);
+      setErrorMessage(error instanceof Error ? error.message : 'Failed to delete account.');
+    } finally {
+      setDeleteAccountLoading(false);
     }
   };
 
@@ -363,6 +482,11 @@ export const Settings = () => {
       {errorMessage && (
         <div className="rounded-xl border border-red-500/30 bg-red-500/10 text-red-500 px-4 py-3 text-sm">
           {errorMessage}
+        </div>
+      )}
+      {successMessage && (
+        <div className="rounded-xl border border-emerald-500/30 bg-emerald-500/10 text-emerald-500 px-4 py-3 text-sm">
+          {successMessage}
         </div>
       )}
 
@@ -759,18 +883,51 @@ export const Settings = () => {
                       <input
                         type="password"
                         placeholder="Current Password"
+                        value={currentPassword}
+                        onChange={(e) => setCurrentPassword(e.target.value)}
                         className="w-full bg-zinc-50 dark:bg-zinc-950 border border-zinc-200 dark:border-white/5 rounded-xl px-4 py-3 text-sm text-zinc-900 dark:text-white focus:outline-none focus:border-emerald-500/50 transition-colors"
                       />
                       <input
                         type="password"
                         placeholder="New Password"
+                        value={newPassword}
+                        onChange={(e) => setNewPassword(e.target.value)}
                         className="w-full bg-zinc-50 dark:bg-zinc-950 border border-zinc-200 dark:border-white/5 rounded-xl px-4 py-3 text-sm text-zinc-900 dark:text-white focus:outline-none focus:border-emerald-500/50 transition-colors"
                       />
-                      <button className="bg-zinc-100 dark:bg-white/5 text-zinc-900 dark:text-white border border-zinc-200 dark:border-white/10 px-6 py-2 rounded-lg text-sm font-semibold hover:bg-zinc-200 dark:hover:bg-white/10 transition-colors w-fit">
-                        Update Password
+                      <button
+                        type="button"
+                        onClick={handlePasswordReset}
+                        disabled={passwordResetLoading}
+                        className="bg-zinc-100 dark:bg-white/5 text-zinc-900 dark:text-white border border-zinc-200 dark:border-white/10 px-6 py-2 rounded-lg text-sm font-semibold hover:bg-zinc-200 dark:hover:bg-white/10 transition-colors w-fit disabled:opacity-50"
+                      >
+                        {passwordResetLoading ? 'Sending...' : 'Send Password Reset Email'}
                       </button>
                     </div>
                   </div>
+                </div>
+              </section>
+
+              <section className="bg-white dark:bg-zinc-900/50 border border-red-200 dark:border-red-500/30 rounded-2xl p-8 space-y-6 shadow-sm dark:shadow-none">
+                <h2 className="text-lg font-bold text-red-600 dark:text-red-400 flex items-center gap-2">
+                  <Trash2 className="w-5 h-5" />
+                  Danger Zone
+                </h2>
+                <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4 p-4 bg-red-50 dark:bg-red-500/10 border border-red-200 dark:border-red-500/20 rounded-xl">
+                  <div>
+                    <p className="text-sm font-semibold text-zinc-900 dark:text-white">Delete Account</p>
+                    <p className="text-xs text-zinc-600 dark:text-zinc-300">
+                      This permanently deletes your user account, removes your memberships, and signs you out everywhere.
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={handleDeleteAccount}
+                    disabled={deleteAccountLoading}
+                    className="inline-flex items-center justify-center gap-2 bg-red-600 text-white px-5 py-2.5 rounded-lg text-sm font-bold hover:bg-red-500 transition-colors disabled:opacity-50"
+                  >
+                    {deleteAccountLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Trash2 className="w-4 h-4" />}
+                    Delete Account
+                  </button>
                 </div>
               </section>
             </div>
