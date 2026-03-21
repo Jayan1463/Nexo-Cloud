@@ -117,7 +117,14 @@ export const Settings = () => {
       // Fetch user profiles for these members
       const memberProfiles = await Promise.all(memberDocs.map(async (m) => {
         const uSnap = await getDoc(doc(db, 'users', m.uid));
-        return { ...(uSnap.data() as UserProfile), role: m.role };
+        const userData = uSnap.exists() ? (uSnap.data() as UserProfile) : null;
+        return {
+          uid: m.uid,
+          email: userData?.email || '',
+          displayName: userData?.displayName || '',
+          photoURL: userData?.photoURL || '',
+          role: m.role,
+        } as UserProfile & { role: string };
       }));
       
       setMembers(memberProfiles);

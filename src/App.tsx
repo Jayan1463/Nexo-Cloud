@@ -1,9 +1,12 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { 
   auth, 
   onAuthStateChanged, 
   signInWithPopup, 
   googleProvider,
+  signInWithEmailAndPassword,
+  createUserWithEmailAndPassword,
+  updateProfile,
   db,
   doc,
   setDoc,
@@ -53,6 +56,7 @@ export default function App() {
   const { user, setUser, currentOrgId, setOrg, setProject, theme, isSidebarCollapsed } = useAppStore();
   const [activeTab, setActiveTab] = useState('dashboard');
   const [loading, setLoading] = useState(true);
+  const inviteHandledRef = useRef(false);
 
   useEffect(() => {
     const root = window.document.documentElement;
@@ -64,6 +68,7 @@ export default function App() {
   }, [theme]);
 
   useEffect(() => {
+    inviteHandledRef.current = false;
     const unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
       if (firebaseUser) {
         // Sync user to Firestore
@@ -178,6 +183,79 @@ export default function App() {
     return () => unsubscribe();
   }, [setUser, setOrg]);
 
+  useEffect(() => {
+    const acceptInvite = async () => {
+      if (!user || inviteHandledRef.current) return;
+      if (window.location.pathname !== '/accept-invite') return;
+
+      inviteHandledRef.current = true;
+      const params = new URLSearchParams(window.location.search);
+      const orgId = params.get('orgId');
+      const inviteId = params.get('inviteId');
+      const token = params.get('token');
+
+      if (!orgId || !inviteId || !token || !user.email) {
+        alert('Invalid invite link. Please ask for a new invitation.');
+        window.history.replaceState({}, '', '/');
+        return;
+      }
+
+      try {
+        const inviteRef = doc(db, `organizations/${orgId}/invites`, inviteId);
+        const inviteSnap = await getDoc(inviteRef);
+        if (!inviteSnap.exists()) {
+          alert('Invite not found or expired.');
+          window.history.replaceState({}, '', '/');
+          return;
+        }
+
+        const invite = inviteSnap.data() as any;
+        const inviteEmail = String(invite.email || '').toLowerCase();
+        const userEmail = String(user.email || '').toLowerCase();
+        if (invite.status !== 'pending' || invite.inviteToken !== token || inviteEmail !== userEmail) {
+          alert('This invite is invalid for your account.');
+          window.history.replaceState({}, '', '/');
+          return;
+        }
+
+        const memberRef = doc(db, `organizations/${orgId}/members`, user.uid);
+        await setDoc(memberRef, {
+          uid: user.uid,
+          email: user.email,
+          displayName: user.displayName || '',
+          photoURL: user.photoURL || '',
+          role: invite.role || 'viewer',
+          joinedAt: serverTimestamp(),
+        }, { merge: true });
+
+        const userRef = doc(db, 'users', user.uid);
+        const userSnap = await getDoc(userRef);
+        const existingOrgIds = (userSnap.exists() ? (userSnap.data().orgIds || []) : []) as string[];
+        const mergedOrgIds = Array.from(new Set([orgId, ...existingOrgIds]));
+        await setDoc(userRef, {
+          currentOrgId: orgId,
+          orgIds: mergedOrgIds,
+        }, { merge: true });
+
+        await updateDoc(inviteRef, {
+          status: 'accepted',
+          acceptedBy: user.uid,
+          acceptedAt: serverTimestamp(),
+        });
+
+        setOrg(orgId);
+        alert('Invite accepted. Welcome to the organization.');
+      } catch (error) {
+        console.error('Failed to accept invite', error);
+        alert('Failed to accept invite. Please try again.');
+      } finally {
+        window.history.replaceState({}, '', '/');
+      }
+    };
+
+    acceptInvite();
+  }, [user, setOrg]);
+
   if (loading) {
     return (
       <div className="h-screen w-screen bg-white dark:bg-zinc-950 flex flex-col items-center justify-center gap-4 transition-colors duration-300">
@@ -230,11 +308,59 @@ export default function App() {
 }
 
 const LoginPage = () => {
-  const handleLogin = async () => {
+  const [mode, setMode] = useState<'login' | 'signup'>('login');
+  const [displayName, setDisplayName] = useState('');
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+  const [errorMessage, setErrorMessage] = useState('');
+
+  const handleGoogleLogin = async () => {
     try {
+      setErrorMessage('');
       await signInWithPopup(auth, googleProvider);
     } catch (error) {
       console.error("Login failed", error);
+      setErrorMessage('Google sign-in failed. Please try again.');
+    }
+  };
+
+  const handleEmailAuth = async () => {
+    const normalizedEmail = email.trim().toLowerCase();
+    if (!normalizedEmail || !password.trim()) {
+      setErrorMessage('Email and password are required.');
+      return;
+    }
+    if (mode === 'signup') {
+      if (!displayName.trim()) {
+        setErrorMessage('Display name is required for sign up.');
+        return;
+      }
+      if (password.length < 8) {
+        setErrorMessage('Password must be at least 8 characters.');
+        return;
+      }
+      if (password !== confirmPassword) {
+        setErrorMessage('Passwords do not match.');
+        return;
+      }
+    }
+
+    setSubmitting(true);
+    setErrorMessage('');
+    try {
+      if (mode === 'login') {
+        await signInWithEmailAndPassword(auth, normalizedEmail, password);
+      } else {
+        const cred = await createUserWithEmailAndPassword(auth, normalizedEmail, password);
+        await updateProfile(cred.user, { displayName: displayName.trim() });
+      }
+    } catch (error) {
+      console.error('Email auth failed', error);
+      setErrorMessage(mode === 'login' ? 'Invalid email/password.' : 'Could not create account.');
+    } finally {
+      setSubmitting(false);
     }
   };
 
@@ -268,8 +394,87 @@ const LoginPage = () => {
           </div>
 
           <div className="w-full space-y-4">
+            <div className="inline-flex bg-zinc-100 dark:bg-zinc-950/80 border border-zinc-200 dark:border-white/10 rounded-xl p-1 w-full">
+              <button
+                type="button"
+                onClick={() => setMode('login')}
+                className={cn(
+                  "flex-1 px-4 py-2 text-sm rounded-lg font-semibold transition-colors",
+                  mode === 'login'
+                    ? "bg-zinc-900 dark:bg-white text-white dark:text-zinc-950"
+                    : "text-zinc-500 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-white"
+                )}
+              >
+                Login
+              </button>
+              <button
+                type="button"
+                onClick={() => setMode('signup')}
+                className={cn(
+                  "flex-1 px-4 py-2 text-sm rounded-lg font-semibold transition-colors",
+                  mode === 'signup'
+                    ? "bg-zinc-900 dark:bg-white text-white dark:text-zinc-950"
+                    : "text-zinc-500 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-white"
+                )}
+              >
+                Sign Up
+              </button>
+            </div>
+
+            {mode === 'signup' && (
+              <input
+                type="text"
+                placeholder="Display name"
+                value={displayName}
+                onChange={(e) => setDisplayName(e.target.value)}
+                className="w-full bg-zinc-50 dark:bg-zinc-950 border border-zinc-200 dark:border-white/10 rounded-xl px-4 py-3 text-sm text-zinc-900 dark:text-white focus:outline-none focus:border-emerald-500/50 transition-colors"
+              />
+            )}
+            <input
+              type="email"
+              placeholder="Email address"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              className="w-full bg-zinc-50 dark:bg-zinc-950 border border-zinc-200 dark:border-white/10 rounded-xl px-4 py-3 text-sm text-zinc-900 dark:text-white focus:outline-none focus:border-emerald-500/50 transition-colors"
+            />
+            <input
+              type="password"
+              placeholder="Password"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              className="w-full bg-zinc-50 dark:bg-zinc-950 border border-zinc-200 dark:border-white/10 rounded-xl px-4 py-3 text-sm text-zinc-900 dark:text-white focus:outline-none focus:border-emerald-500/50 transition-colors"
+            />
+            {mode === 'signup' && (
+              <input
+                type="password"
+                placeholder="Confirm password"
+                value={confirmPassword}
+                onChange={(e) => setConfirmPassword(e.target.value)}
+                className="w-full bg-zinc-50 dark:bg-zinc-950 border border-zinc-200 dark:border-white/10 rounded-xl px-4 py-3 text-sm text-zinc-900 dark:text-white focus:outline-none focus:border-emerald-500/50 transition-colors"
+              />
+            )}
+            {errorMessage && (
+              <div className="rounded-lg border border-red-500/30 bg-red-500/10 text-red-500 px-3 py-2 text-xs text-left">
+                {errorMessage}
+              </div>
+            )}
+            <button
+              onClick={handleEmailAuth}
+              disabled={submitting}
+              className="w-full bg-emerald-500 text-zinc-950 py-4 rounded-2xl font-bold text-base hover:bg-emerald-400 transition-all disabled:opacity-50"
+            >
+              {submitting ? 'Please wait...' : mode === 'login' ? 'Login' : 'Create Account'}
+            </button>
+
+            <div className="flex items-center gap-3 py-1">
+              <div className="h-px flex-1 bg-zinc-200 dark:bg-white/10" />
+              <span className="text-[10px] uppercase tracking-[0.2em] text-zinc-400 dark:text-zinc-500">or</span>
+              <div className="h-px flex-1 bg-zinc-200 dark:bg-white/10" />
+            </div>
+
             <button 
-              onClick={handleLogin}
+              onClick={handleGoogleLogin}
+              disabled={submitting}
               className="w-full bg-zinc-900 dark:bg-white text-white dark:text-zinc-950 py-5 rounded-2xl font-bold text-lg flex items-center justify-center gap-3 hover:scale-[1.02] active:scale-[0.98] transition-all group shadow-xl shadow-zinc-900/10 dark:shadow-white/5"
             >
               <img src="https://www.google.com/favicon.ico" className="w-5 h-5" alt="Google" />
