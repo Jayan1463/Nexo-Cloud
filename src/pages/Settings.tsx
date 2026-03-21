@@ -21,7 +21,6 @@ import {
   ChevronDown
 } from 'lucide-react';
 import { 
-  auth, 
   db, 
   doc, 
   getDoc, 
@@ -32,7 +31,6 @@ import {
   onSnapshot, 
   updateDoc, 
   deleteDoc,
-  addDoc,
   serverTimestamp 
 } from '../firebase';
 import { useAppStore } from '../store';
@@ -49,6 +47,7 @@ export const Settings = () => {
   const [projects, setProjects] = useState<Project[]>([]);
   const [loading, setLoading] = useState(false);
   const [saved, setSaved] = useState(false);
+  const [errorMessage, setErrorMessage] = useState('');
 
   // Notification settings
   const [notifEmail, setNotifEmail] = useState(true);
@@ -67,6 +66,23 @@ export const Settings = () => {
   const [inviteRows, setInviteRows] = useState<Array<{ email: string; role: 'admin' | 'developer' | 'viewer' }>>([
     { email: '', role: 'viewer' },
   ]);
+
+  useEffect(() => {
+    if (!user?.uid) return;
+    const key = `nexo_settings_${user.uid}`;
+    const raw = localStorage.getItem(key);
+    if (!raw) return;
+    try {
+      const parsed = JSON.parse(raw);
+      if (typeof parsed.notifEmail === 'boolean') setNotifEmail(parsed.notifEmail);
+      if (typeof parsed.notifPush === 'boolean') setNotifPush(parsed.notifPush);
+      if (typeof parsed.notifFrequency === 'number') setNotifFrequency(parsed.notifFrequency);
+      if (typeof parsed.twoFactor === 'boolean') setTwoFactor(parsed.twoFactor);
+      if (typeof parsed.billingEmail === 'string') setBillingEmail(parsed.billingEmail);
+    } catch {
+      // Ignore malformed local settings.
+    }
+  }, [user?.uid]);
 
   // Fetch Organization Data
   useEffect(() => {
@@ -117,14 +133,20 @@ export const Settings = () => {
 
   const handleSaveProfile = async () => {
     if (!user) return;
+    setErrorMessage('');
     setLoading(true);
     try {
       const userRef = doc(db, 'users', user.uid);
-      await updateDoc(userRef, { displayName });
+      await setDoc(userRef, {
+        displayName: displayName.trim(),
+        photoURL: user.photoURL || '',
+        ...(currentOrgId ? { currentOrgId } : {}),
+      }, { merge: true });
       setSaved(true);
       setTimeout(() => setSaved(false), 3000);
     } catch (error) {
       console.error("Failed to save profile", error);
+      setErrorMessage('Failed to save profile. Please try again.');
     } finally {
       setLoading(false);
     }
@@ -132,14 +154,16 @@ export const Settings = () => {
 
   const handleUpdateOrg = async (updates: Partial<Organization>) => {
     if (!currentOrgId) return;
+    setErrorMessage('');
     setLoading(true);
     try {
       const orgRef = doc(db, 'organizations', currentOrgId);
-      await updateDoc(orgRef, updates);
+      await setDoc(orgRef, updates, { merge: true });
       setSaved(true);
       setTimeout(() => setSaved(false), 3000);
     } catch (error) {
       console.error("Failed to update organization", error);
+      setErrorMessage('Failed to update organization.');
     } finally {
       setLoading(false);
     }
@@ -219,24 +243,38 @@ export const Settings = () => {
 
     setLoading(true);
     try {
-      const invitesRef = collection(db, `organizations/${currentOrgId}/invites`);
-      await Promise.all(
-        rowsToInvite.map((row) =>
-          addDoc(invitesRef, {
-            orgId: currentOrgId,
-            email: row.email,
-            role: row.role,
-            status: 'pending',
-            invitedBy: user.uid,
-            createdAt: serverTimestamp(),
-          })
-        )
+      const results = await Promise.all(
+        rowsToInvite.map(async (row) => {
+          const response = await fetch('/api/invite', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              orgId: currentOrgId,
+              email: row.email,
+              role: row.role,
+              invitedBy: user.uid,
+            }),
+          });
+          if (!response.ok) {
+            const payload = await response.json().catch(() => ({}));
+            throw new Error(payload?.error || `Failed to invite ${row.email}`);
+          }
+          return response.json();
+        })
       );
+
+      const hadFallbackLogging = results.some((r: any) => typeof r?.inviteLink === 'string');
       setInviteRows([{ email: '', role: 'viewer' }]);
       setSaved(true);
       setTimeout(() => setSaved(false), 3000);
+      if (hadFallbackLogging) {
+        console.warn('Invite links returned in API response. Configure RESEND_API_KEY to send real emails.');
+      }
     } catch (error) {
       console.error('Failed to send invites', error);
+      const message = error instanceof Error ? error.message : 'Failed to send invites';
+      setErrorMessage(message);
+      alert(message);
     } finally {
       setLoading(false);
     }
@@ -278,16 +316,31 @@ export const Settings = () => {
   };
 
   const handleSaveAll = async () => {
+    if (!user?.uid) return;
+    setErrorMessage('');
     setLoading(true);
-    // Simulate API call for security/notifications/billing
-    await new Promise(resolve => setTimeout(resolve, 800));
-    setSaved(true);
-    setLoading(false);
-    setTimeout(() => setSaved(false), 3000);
+    try {
+      const key = `nexo_settings_${user.uid}`;
+      localStorage.setItem(key, JSON.stringify({
+        notifEmail,
+        notifPush,
+        notifFrequency,
+        twoFactor,
+        billingEmail: billingEmail.trim(),
+        updatedAt: Date.now(),
+      }));
+      setSaved(true);
+      setTimeout(() => setSaved(false), 3000);
+    } catch (error) {
+      console.error('Failed to save settings', error);
+      setErrorMessage('Failed to save settings in this browser.');
+    } finally {
+      setLoading(false);
+    }
   };
 
-  const currentUserRole = members.find(m => m.uid === user?.uid)?.role || 'viewer';
-  const canManage = currentUserRole === 'owner' || currentUserRole === 'admin';
+  const currentUserRole = members.find(m => m.uid === user?.uid)?.role || (org?.ownerId === user?.uid ? 'owner' : 'viewer');
+  const canManage = currentUserRole === 'owner' || currentUserRole === 'admin' || org?.ownerId === user?.uid;
 
   return (
     <div className="p-8 max-w-6xl mx-auto space-y-12 animate-in fade-in slide-in-from-bottom-4 duration-500">
@@ -307,6 +360,11 @@ export const Settings = () => {
           </button>
         )}
       </div>
+      {errorMessage && (
+        <div className="rounded-xl border border-red-500/30 bg-red-500/10 text-red-500 px-4 py-3 text-sm">
+          {errorMessage}
+        </div>
+      )}
 
       <div className="grid grid-cols-1 md:grid-cols-4 gap-12">
         <div className="space-y-1 bg-white dark:bg-zinc-900/30 p-2 rounded-2xl border border-zinc-200 dark:border-white/5 h-fit sticky top-24 shadow-sm dark:shadow-none">
