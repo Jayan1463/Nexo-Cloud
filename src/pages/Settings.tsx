@@ -234,6 +234,17 @@ export const Settings = () => {
     try {
       const memberRef = doc(db, `organizations/${currentOrgId}/members`, memberUid);
       await deleteDoc(memberRef);
+      const userRef = doc(db, 'users', memberUid);
+      const userSnap = await getDoc(userRef);
+      if (userSnap.exists()) {
+        const data = userSnap.data() as any;
+        const orgIds = Array.isArray(data.orgIds) ? data.orgIds.filter((id: string) => id !== currentOrgId) : [];
+        await setDoc(userRef, {
+          orgIds,
+          currentOrgId: orgIds[0] || null,
+          role: 'viewer',
+        }, { merge: true });
+      }
     } catch (error) {
       console.error("Failed to remove member", error);
     }
